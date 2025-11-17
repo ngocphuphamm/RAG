@@ -4,6 +4,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage } from 'langchain';
 import { EMBEDDINGS_CONFIG, MODEL_CONFIG } from '@rag/rag.config';
 import { PGVectorStore } from '@langchain/community/vectorstores/pgvector';
+import { IngestRequest } from '@rag/dtos';
 @Injectable()
 export class RagService {
     private _embeddings: OpenAIEmbeddings;
@@ -22,6 +23,22 @@ export class RagService {
             apiKey: process.env.OPENAI_API_KEY,
             ...MODEL_CONFIG // Uncomment if you are using configs
         });
+    }
+    async ingestDocuments(req: IngestRequest): Promise<string> {
+        const store = await this.getStore();
+        // Ingestion logic to be implemented here
+        await store.addDocuments([
+            {
+                pageContent: req.text.trim(),
+                metadata: {
+                    ...req.metadata,
+                    ingestedAt: new Date().toISOString(),
+                    source: "direct_ingest"
+                },
+            },
+        ]);
+
+        return "Ingestion not implemented";
     }
     async checkGetStore(): Promise<string> {
         await this.getStore();
