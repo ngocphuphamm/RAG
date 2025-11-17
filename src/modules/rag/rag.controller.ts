@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Post, Req } from '@nestjs/common';
 import { RagService } from '@rag/rag.service';
 import { IngestRequest } from '@rag/dtos';
-import { CoreApiResponse } from '@high3ar/common-api';
+import { CoreApiResponse, H3Logger } from '@high3ar/common-api';
 
 @Controller('rag')
 export class RagController {
@@ -12,7 +12,9 @@ export class RagController {
     
     @Post('ingest')
     async ingestDocuments(@Body() req: IngestRequest): Promise<CoreApiResponse<string>> {
+        H3Logger.info('req :: POST ::  ingest documents');
         const result = await this._ragService.ingestDocuments(req);
+        H3Logger.info('response :: POST ::  get profile');
         return CoreApiResponse.success(result);
     }
 
