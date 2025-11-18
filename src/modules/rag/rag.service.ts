@@ -1,24 +1,94 @@
 // src/rag/rag.service.ts
 import { Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { IngestRequest } from '@rag/dtos';
-import { PostgresService } from '@infrastructure/database/postgres.service'; // Adjust path as needed
-import { extractAnswerText, prompt } from './util';
+import { PostgresService } from '@infrastructure/database/postgres.service'; 
+import { cleanMarkdown, extractAnswerText, prompt } from './util';
 import { ModelOpenAI } from '@infrastructure/openai';
 import { EmbeddingsOpenAI } from '@infrastructure/openai/embeddings';
 import { QueryResponse } from '@rag/dtos';
+import * as fs from 'fs';
+import { CHUNK_OVERLAP, CHUNK_SIZE } from './config';
+import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
+
 @Injectable()
 export class RagService {
   private _model: ModelOpenAI;
   private _postgresService: PostgresService;
   private readonly _embeddings: EmbeddingsOpenAI;
 
-  // 1. Inject the new PostgresService
   constructor(private readonly postgresService: PostgresService) {
-    // Initialize only the LangChain Chat Model here
     this._model = new ModelOpenAI();
     this._embeddings = new EmbeddingsOpenAI();
     this._postgresService = postgresService;
+  } 
+
+  async processAndStoreDocument(file: Express.Multer.File, originalFileName: string): Promise<{ chunks: number, wasMarkdownCleaned: boolean }> {
+    const filePath = file.path;
+    if (!fs.existsSync(filePath)) {
+        throw new InternalServerErrorException('Uploaded file path is invalid.');
+    }
+
+    try {
+      let content = fs.readFileSync(filePath, 'utf8');
+
+      if (!content.trim()) {
+        throw new InternalServerErrorException('File content is empty.');
+      }
+
+      const isMarkdown = file.mimetype === 'text/markdown' || originalFileName.endsWith('.md');
+      if (isMarkdown) {
+        content = cleanMarkdown(content);
+      }
+
+      // 3. Split chunk
+      const splitter = new RecursiveCharacterTextSplitter({
+        chunkSize: CHUNK_SIZE,
+        chunkOverlap: CHUNK_OVERLAP,
+      });
+      const chunks = await splitter.splitText(content);
+      // // 4. Get store and add documents
+      const store = await this._postgresService.getVectorStore();
+
+
+      const documents = chunks.map((chunk, idx) => ({
+        pageContent: chunk,
+        metadata: {
+          filename: originalFileName,
+          mimeType: file.mimetype,
+          size: file.size,
+          chunkIndex: idx,
+          totalChunks: chunks.length,
+          uploadedAt: new Date().toISOString(),
+          source: 'file_upload',
+        },
+      }));
+
+      await store.addDocuments(documents);
+
+      return {
+        chunks: chunks.length,
+        wasMarkdownCleaned: isMarkdown
+      };
+
+    } catch (error) {
+        console.error('❌ DocumentsService error:', error);
+        
+        if (error.message.includes('store')) {
+             throw new InternalServerErrorException('Failed to save documents to store.');
+        }
+        
+        throw new InternalServerErrorException('Failed to process and store document.');
+
+    } finally {
+        // 5. Clean up temporary file (Important!)
+        if (fs.existsSync(filePath)) {
+            fs.unlink(filePath, (err) => {
+                if (err) console.error('Failed to delete temp file:', err);
+            });
+        }
+    }
   }
+
   async queryDocuments(query: string): Promise<any> {
     const queryVector = await this._embeddings.embedQuery(query);
     const results = await this.searchSimilarDocuments(query, queryVector);
@@ -89,22 +159,11 @@ export class RagService {
 
 
 
-  /**
-   * @returns A promise that resolves to "active" if both OpenAI components
-   * can successfully perform a minimal task, or throws an error otherwise.
-   */
+
   async checkOpenAi(): Promise<string> {
-    // Note: Since _embeddings is now in PostgresService, you should consider
-    // moving the embeddings check there, or accessing it via a public method 
-    // if you absolutely need the check here. For simplicity, we'll keep the 
-    // model check here and assume the embeddings check is part of the 
-    // `checkGetStore` or a new method on `PostgresService`.
     try {
-      // 1. Test the Chat Model (_model)
       const chatTest = await this._model.invoke("Hello, are you there?");
       console.log(chatTest)
-      // We rely on checkGetStore to validate the embeddings/vector store connection
-      // as the embeddings object is now managed by PostgresService.
       await this.checkGetStore();
 
       return "active";
