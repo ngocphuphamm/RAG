@@ -6,7 +6,6 @@ import { EMBEDDINGS_CONFIG } from '@infrastructure/config';
 
 @Injectable()
 export class PostgresService {
-  // Use a static property for the single instance of the vector store
   public static storeInstance: PGVectorStore | null = null;
   private readonly _embeddings: OpenAIEmbeddings;
   private readonly _pgConn: string;
@@ -20,10 +19,6 @@ export class PostgresService {
     });
   }
 
-  /**
-   * Initializes and returns the PGVectorStore singleton instance.
-   * This logic is now handled in a static method, ensuring it's only run once.
-   */
   public async getVectorStore(): Promise<PGVectorStore> {
     if (!PostgresService.storeInstance) {
       if (!this._pgConn) {
@@ -46,9 +41,6 @@ export class PostgresService {
     return PostgresService.storeInstance;
   }
 
-  /**
-   * Optional: A simple check to ensure the store can be initialized/accessed.
-   */
   public async checkStoreAvailability(): Promise<string> {
     try {
       // Access the store via the regular method, which handles the static initialization
