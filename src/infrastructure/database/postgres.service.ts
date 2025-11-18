@@ -2,7 +2,7 @@
 import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { OpenAIEmbeddings } from '@langchain/openai';
 import { PGVectorStore } from '@langchain/community/vectorstores/pgvector';
-import { EMBEDDINGS_CONFIG } from '@rag/rag.config';
+import { EMBEDDINGS_CONFIG } from '@infrastructure/config';
 
 @Injectable()
 export class PostgresService {
