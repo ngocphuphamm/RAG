@@ -19,4 +19,13 @@ export class ModelOpenAI {
             throw e;
         }
     }
+
+    public async stream(message: string) {
+        try {
+            return this._model.stream(message);
+        } catch (e) {
+            console.error("Error streaming OpenAI model:", e);
+            throw e;
+        }
+    }
 }
