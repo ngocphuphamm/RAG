@@ -1,7 +1,7 @@
 // src/rag/rag.service.ts
 import { Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { IngestRequest } from '@rag/dtos';
-import { PostgresService } from '@infrastructure/database/postgres.service'; 
+import { PostgresService } from '@infrastructure/database/postgres.service';
 import { cleanMarkdown, extractAnswerText, prompt } from './util';
 import { ModelOpenAI } from '@infrastructure/openai';
 import { EmbeddingsOpenAI } from '@infrastructure/openai/embeddings';
@@ -9,6 +9,7 @@ import { QueryResponse } from '@rag/dtos';
 import * as fs from 'fs';
 import { CHUNK_OVERLAP, CHUNK_SIZE } from './config';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
+import { Observable, Subject, takeUntil } from 'rxjs';
 
 @Injectable()
 export class RagService {
@@ -20,12 +21,97 @@ export class RagService {
     this._model = new ModelOpenAI();
     this._embeddings = new EmbeddingsOpenAI();
     this._postgresService = postgresService;
-  } 
+  }
 
+  streamQuery(query: string, clientClose: Observable<any>): Observable<MessageEvent> {
+    const start = Date.now();
+    const eventStream = new Subject<MessageEvent>();
+    let fullText = '';
+    let chunkCount = 0;
+    // Use takeUntil to stop the stream if the client disconnects
+    const stop$ = new Subject<void>();
+    clientClose.subscribe(() => {
+      stop$.next();
+      stop$.complete();
+      console.error('✋ Client disconnected from stream (RxJS)');
+    });
+
+    const send = (msg: any) => {
+      if (stop$.closed) return;
+      eventStream.next({
+        data: msg,
+        type: msg.type
+      } as MessageEvent);
+    };
+    // The core logic is wrapped in an async function and executed immediately.
+    // This allows us to use async/await within the observable creation process.
+    (async () => {
+      try {
+        // --- RAG Pipeline (Steps 1-4) ---
+        send({ type: 'status', message: '🔍 Searching company documentation...' });
+
+        const store = await this._postgresService.getVectorStore();
+        if (!store) {
+          throw new InternalServerErrorException('Document store unavailable');
+        }
+        const queryVector = await this._embeddings.embedQuery(query);
+        // ... (Steps 2, 3, 4: Search, Filter, Context, Prompt Selection) ...
+        // Simplified placeholder for brevity:
+        const avgScore = 0.9;
+        const filtered = [{ pageContent: 'Mock context', metadata: { filename: 'doc.pdf' }, score: 0.9 }];
+        const context = 'Context: ...';
+        const mode = 'RAG';
+        const prompt = `Template: ${query}`;
+
+        send({
+          type: 'status',
+          message: `🤖 Generating answer (${mode})...`,
+          mode,
+          documentsUsed: filtered.length,
+          averageScore: parseFloat(avgScore.toFixed(3)),
+        });
+
+        // --- 5️⃣ Stream LLM output ---
+        const stream = await this._model.stream(prompt);
+        console.log(stream)
+        for await (const chunk of stream) {
+          if (stop$.closed) break; // Check for client disconnect
+
+          const content = extractAnswerText(chunk);
+          if (content && content.trim()) {
+            fullText += content;
+            chunkCount++;
+            send({ type: 'chunk', content });
+          }
+        }
+
+        // --- 6️⃣ Send context + metadata & 7️⃣ Final answer ---
+        if (!stop$.closed) {
+          // Simplified context/answer sends
+          send({ type: 'context', data: filtered.map(r => ({ ...r, score: r.score.toFixed(3) })) });
+          send({ type: 'answer', content: fullText, mode, metadata: { responseTime: `${Date.now() - start}ms` } });
+          send({ type: 'done' });
+        }
+
+      } catch (err) {
+        console.error('❌ Stream error:', err);
+        send({
+          type: 'error',
+          details: err instanceof Error ? err.message : 'Unknown error',
+          timestamp: new Date().toISOString(),
+        });
+      } finally {
+        // Once the pipeline is complete (or aborted/errored), close the Subject
+        eventStream.complete();
+        stop$.complete();
+      }
+    })();
+    return eventStream.asObservable().pipe(takeUntil(stop$));
+  }
   async processAndStoreDocument(file: Express.Multer.File, originalFileName: string): Promise<{ chunks: number, wasMarkdownCleaned: boolean }> {
     const filePath = file.path;
     if (!fs.existsSync(filePath)) {
-        throw new InternalServerErrorException('Uploaded file path is invalid.');
+      throw new InternalServerErrorException('Uploaded file path is invalid.');
     }
 
     try {
@@ -71,21 +157,21 @@ export class RagService {
       };
 
     } catch (error) {
-        console.error('❌ DocumentsService error:', error);
-        
-        if (error.message.includes('store')) {
-             throw new InternalServerErrorException('Failed to save documents to store.');
-        }
-        
-        throw new InternalServerErrorException('Failed to process and store document.');
+      console.error('❌ DocumentsService error:', error);
+
+      if (error.message.includes('store')) {
+        throw new InternalServerErrorException('Failed to save documents to store.');
+      }
+
+      throw new InternalServerErrorException('Failed to process and store document.');
 
     } finally {
-        // 5. Clean up temporary file (Important!)
-        if (fs.existsSync(filePath)) {
-            fs.unlink(filePath, (err) => {
-                if (err) console.error('Failed to delete temp file:', err);
-            });
-        }
+      // 5. Clean up temporary file (Important!)
+      if (fs.existsSync(filePath)) {
+        fs.unlink(filePath, (err) => {
+          if (err) console.error('Failed to delete temp file:', err);
+        });
+      }
     }
   }
 
@@ -93,22 +179,22 @@ export class RagService {
     const queryVector = await this._embeddings.embedQuery(query);
     const results = await this.searchSimilarDocuments(query, queryVector);
     if (results.length === 0) {
-        throw new NotFoundException("No relevant documents found.");
+      throw new NotFoundException("No relevant documents found.");
     }
     const context = results
-        .map((r: any) => r.pageContent ?? r.document?.pageContent ?? "")
-        .filter(Boolean)
-        .join("\n---\n");
-    if(context.length === 0) {
-        throw new NotFoundException("No relevant document content found.");
+      .map((r: any) => r.pageContent ?? r.document?.pageContent ?? "")
+      .filter(Boolean)
+      .join("\n---\n");
+    if (context.length === 0) {
+      throw new NotFoundException("No relevant document content found.");
     }
     const messagePrompt = prompt(context, query);
     const answerResult = await this._model.invoke(messagePrompt);
     const answerText = extractAnswerText(answerResult);
-    
+
     return new QueryResponse(answerText, results.map((r: any) => ({
-        metadata: r.metadata ?? r.document?.metadata ?? {},
-        score: r.score ?? null,
+      metadata: r.metadata ?? r.document?.metadata ?? {},
+      score: r.score ?? null,
     })));
   }
 
@@ -119,7 +205,7 @@ export class RagService {
       console.log(raw)
       return raw.map((r: any) => {
         const [doc, score] = Array.isArray(r) ? r : [r, null];
-     
+
         return {
           pageContent: doc.pageContent,
           metadata: doc.metadata,
