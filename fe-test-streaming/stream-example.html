@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RAG Backend - Streaming Query Example</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Oxygen, Ubuntu, Cantarell, sans-serif;
+        max-width: 800px;
+        margin: 50px auto;
+        padding: 0 20px;
+        background: #f5f5f5;
+      }
+      .container {
+        background: white;
+        padding: 30px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+      h1 {
+        color: #333;
+        margin-bottom: 10px;
+      }
+      .subtitle {
+        color: #666;
+        margin-bottom: 30px;
+      }
+      .input-group {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 20px;
+      }
+      input {
+        flex: 1;
+        padding: 12px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+      button {
+        padding: 12px 24px;
+        background: #0066cc;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+      }
+      button:hover {
+        background: #0052a3;
+      }
+      button:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+      }
+      .status {
+        padding: 10px;
+        margin-bottom: 15px;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+      .status.searching {
+        background: #e3f2fd;
+        color: #1976d2;
+      }
+      .status.generating {
+        background: #fff3e0;
+        color: #f57c00;
+      }
+      .status.error {
+        background: #ffebee;
+        color: #c62828;
+      }
+      .answer-box {
+        background: #f9f9f9;
+        border-left: 4px solid #0066cc;
+        padding: 20px;
+        margin: 20px 0;
+        border-radius: 4px;
+        min-height: 50px;
+        line-height: 1.8;
+        font-size: 15px;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+      .answer-box.streaming {
+        border-left: 4px solid #f57c00;
+      }
+      .answer-box.streaming::after {
+        content: "▊";
+        animation: blink 1s infinite;
+        margin-left: 2px;
+      }
+      @keyframes blink {
+        0%,
+        50% {
+          opacity: 1;
+        }
+        51%,
+        100% {
+          opacity: 0;
+        }
+      }
+      .context-section {
+        margin-top: 30px;
+      }
+      .context-section h3 {
+        color: #333;
+        margin-bottom: 15px;
+      }
+      .context-item {
+        background: #fafafa;
+        border: 1px solid #e0e0e0;
+        padding: 15px;
+        margin-bottom: 10px;
+        border-radius: 4px;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+      .context-item strong {
+        color: #0066cc;
+        display: block;
+        margin-bottom: 8px;
+      }
+      .context-content {
+        color: #444;
+        margin: 10px 0;
+        padding: 10px;
+        background: white;
+        border-radius: 3px;
+        border-left: 3px solid #e0e0e0;
+      }
+      .context-meta {
+        color: #666;
+        font-size: 12px;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid #e0e0e0;
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🔍 RAG Backend - Streaming Query</h1>
+      <p class="subtitle">
+        Ask questions and see responses stream in real-time
+      </p>
+
+      <div class="input-group">
+        <input
+          type="text"
+          id="queryInput"
+          placeholder="Enter your question..."
+          onkeypress="if(event.key==='Enter') streamQuery()"
+        />
+        <button id="queryBtn" onclick="streamQuery()">Ask Question</button>
+      </div>
+
+      <div id="status" class="status hidden"></div>
+
+      <div id="answerBox" class="answer-box hidden">
+        <strong>Answer:</strong><br />
+        <span id="answer"></span>
+      </div>
+
+      <div id="contextSection" class="context-section hidden">
+        <h3>📚 Source Context</h3>
+        <div id="context"></div>
+      </div>
+    </div>
+
+    <script>
+      const API_URL = "http://localhost:3001";
+      let isStreaming = false;
+
+      function showStatus(message, type = "searching") {
+        const statusEl = document.getElementById("status");
+        statusEl.textContent = message;
+        statusEl.className = `status ${type}`;
+        statusEl.classList.remove("hidden");
+      }
+
+      function hideStatus() {
+        document.getElementById("status").classList.add("hidden");
+      }
+
+      function renderContext(items = []) {
+        const contextSection = document.getElementById("contextSection");
+        const contextEl = document.getElementById("context");
+
+        if (!items.length) return;
+
+        contextSection.classList.remove("hidden");
+        contextEl.innerHTML = items
+          .map(
+            (item, idx) => `
+            <div class="context-item">
+              <strong>📄 Source ${idx + 1}</strong>
+              <div class="context-content">${item.pageContent.substring(
+                0,
+                300
+              )}${item.pageContent.length > 300 ? "..." : ""}</div>
+              <div class="context-meta">
+                ${
+                  item.metadata?.filename
+                    ? `File: ${item.metadata.filename}`
+                    : ""
+                }
+                ${
+                  item.metadata?.chunkIndex !== undefined
+                    ? ` • Chunk ${item.metadata.chunkIndex + 1}/${
+                        item.metadata.totalChunks
+                      }`
+                    : ""
+                }
+                ${
+                  item.metadata?.uploadedAt
+                    ? ` • Uploaded: ${new Date(
+                        item.metadata.uploadedAt
+                      ).toLocaleDateString()}`
+                    : ""
+                }
+              </div>
+            </div>
+          `
+          )
+          .join("");
+      }
+
+      async function streamQuery() {
+        const query = document.getElementById("queryInput").value.trim();
+
+        if (!query) {
+          alert("Please enter a question");
+          return;
+        }
+
+        if (isStreaming) return;
+
+        // Reset UI
+        const answerEl = document.getElementById("answer");
+        const answerBox = document.getElementById("answerBox");
+        const contextSection = document.getElementById("contextSection");
+        const contextEl = document.getElementById("context");
+        const queryBtn = document.getElementById("queryBtn");
+
+        answerEl.textContent = "";
+        answerBox.classList.remove("hidden");
+        answerBox.classList.add("streaming");
+        contextSection.classList.add("hidden");
+        contextEl.innerHTML = "";
+        queryBtn.disabled = true;
+        isStreaming = true;
+
+        try {
+          const response = await fetch(`${API_URL}/query/stream`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ query }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            const lines = chunk.split("\n");
+
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              const raw = line.slice(6);
+              if (!raw.trim()) continue;
+
+              let data;
+              try {
+                data = JSON.parse(raw);
+              } catch {
+                console.warn("⚠️ JSON parse fail for line:", line);
+                continue;
+              }
+
+              switch (data.type) {
+                case "status":
+                  showStatus(
+                    data.message,
+                    data.message.includes("Searching")
+                      ? "searching"
+                      : "generating"
+                  );
+                  break;
+
+                case "chunk":
+                  // Ignore internal LangChain metadata (starts with {\"lc\":1,...})
+                  if (
+                    typeof data.content === "string" &&
+                    !data.content.startsWith('{"lc":')
+                  ) {
+                    answerEl.textContent += data.content;
+                  }
+                  break;
+
+                case "context":
+                  hideStatus();
+                  answerBox.classList.remove("streaming");
+                  renderContext(data.data);
+                  break;
+
+                case "error":
+                  showStatus(
+                    `Error: ${data.details || "Unknown error"}`,
+                    "error"
+                  );
+                  answerBox.classList.remove("streaming");
+                  break;
+
+                case "done":
+                  hideStatus();
+                  answerBox.classList.remove("streaming");
+                  console.log("✅ Stream completed");
+                  break;
+
+                default:
+                  console.log("ℹ️ Unhandled SSE type:", data.type);
+                  break;
+              }
+            }
+          }
+        } catch (error) {
+          console.error("Stream error:", error);
+          showStatus(`Connection error: ${error.message}`, "error");
+          answerBox.classList.remove("streaming");
+        } finally {
+          isStreaming = false;
+          queryBtn.disabled = false;
+        }
+      }
+    </script>
+  </body>
+</html>

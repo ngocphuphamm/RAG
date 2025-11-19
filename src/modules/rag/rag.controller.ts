@@ -12,6 +12,7 @@ export class RagController {
         this._ragService = ragService;
     }
 
+  
   @Post('/upload-file')
   @UseInterceptors(FileInterceptor('file', { storage: storage }))
   async uploadDocument(
