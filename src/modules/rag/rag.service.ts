@@ -30,7 +30,7 @@ export class RagService {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     // Important for ensuring stream is not buffered by reverse proxies like Nginx
-    res.setHeader('X-Accel-Buffering', 'no'); 
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
     let aborted = false;
@@ -65,14 +65,14 @@ export class RagService {
       const avgScore =
         scoredResults.length > 0
           ? scoredResults.reduce((sum: number, r: any) => sum + r.score, 0) /
-            scoredResults.length
+          scoredResults.length
           : 0;
 
       // Debug logging
       console.log(`📊 Query: "${query.substring(0, 50)}..."`);
       console.log(`📈 Average relevance score: ${avgScore.toFixed(3)}`);
       // Note: NestJS's default logger handles console output similarly
-      
+
       // --- 3️⃣ Filter and build context ---
       const filtered = scoredResults.filter(
         (r: { score: number }) => r.score >= SCORE_CONFIG.MEDIUM_CONFIDENCE,
@@ -266,7 +266,6 @@ export class RagService {
   async queryDocuments(query: string): Promise<any> {
     const queryVector = await this._embeddings.embedQuery(query);
     const results = await this.searchSimilarDocuments(query, queryVector);
-    console.log(`🔍 Query: "${query.substring(0, 50)}..."`);
     if (results.length === 0) {
       throw new NotFoundException("No relevant documents found.");
     }
@@ -287,18 +286,27 @@ export class RagService {
     })));
   }
 
-  async searchSimilarDocuments(query: string, queryVector: number[], topK: number = 3) {
+  async searchSimilarDocuments(query: string, queryVector: number[], topK: number = 100) {
     const store = await this._postgresService.getVectorStore();
     if (store.similaritySearchVectorWithScore) {
+
       const raw = await store.similaritySearchVectorWithScore(queryVector, topK);
-      console.log(raw)
+
+      if (!raw || raw.length === 0) {
+        return [];
+      }
+
+
       return raw.map((r: any) => {
         const [doc, score] = Array.isArray(r) ? r : [r, null];
+        const roundedScore = (typeof score === 'number') 
+            ? Math.round(score * 10000) / 10000 
+            : score;
 
         return {
           pageContent: doc.pageContent,
           metadata: doc.metadata,
-          score,
+          score : roundedScore,
         };
       });
     }
