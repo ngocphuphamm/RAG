@@ -1,4 +1,6 @@
+import { CONTEXT_CONFIG, SCORE_CONFIG } from "@infrastructure/config";
 import removeMarkdown from "remove-markdown";
+import { PROMPTS } from "./prompts";
 
 
 export const prompt = (context: string, query: string) =>{
@@ -26,4 +28,35 @@ export const cleanMarkdown = (raw: string): string  =>{
     .replace(/\[(.*?)\]\(.*?\)/g, "$1") // keep link text only
     .replace(/\s+/g, " ")
     .trim();
+}
+
+export const selectPromptMode = (
+  context: string,
+  avgScore: number,
+  documentCount: number
+): { mode: string; template: (ctx: string, q: string) => string }  =>{
+  // No meaningful context
+  if (!context || context.length < CONTEXT_CONFIG.MIN_CONTEXT_LENGTH) {
+    return { mode: "General", template: PROMPTS.GENERAL };
+  }
+
+  // High confidence with good documents
+  if (
+    avgScore >= SCORE_CONFIG.HIGH_CONFIDENCE &&
+    documentCount >= CONTEXT_CONFIG.MIN_DOCUMENTS
+  ) {
+    return { mode: "RAG (High Confidence)", template: PROMPTS.RAG };
+  }
+
+  // Medium confidence or few documents
+  if (avgScore >= SCORE_CONFIG.MEDIUM_CONFIDENCE && documentCount >= 1) {
+    return { mode: "Hybrid (Medium Confidence)", template: PROMPTS.HYBRID };
+  }
+
+  // Low confidence - use general with caution
+  if (avgScore >= SCORE_CONFIG.LOW_CONFIDENCE) {
+    return { mode: "Hybrid (Low Confidence)", template: PROMPTS.HYBRID };
+  }
+
+  return { mode: "General", template: PROMPTS.GENERAL };
 }

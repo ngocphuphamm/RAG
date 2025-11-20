@@ -1,8 +1,8 @@
 // src/rag/rag.service.ts
-import { Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
-import { IngestRequest } from '@rag/dtos';
+import { BadRequestException, Body, Injectable, InternalServerErrorException, NotFoundException, Res } from '@nestjs/common';
+import { IngestRequest, QueryRequest, StreamMessage } from '@rag/dtos';
 import { PostgresService } from '@infrastructure/database/postgres.service';
-import { cleanMarkdown, extractAnswerText, prompt } from './util';
+import { cleanMarkdown, extractAnswerText, prompt, selectPromptMode } from './util';
 import { ModelOpenAI } from '@infrastructure/openai';
 import { EmbeddingsOpenAI } from '@infrastructure/openai/embeddings';
 import { QueryResponse } from '@rag/dtos';
@@ -10,7 +10,8 @@ import * as fs from 'fs';
 import { CHUNK_OVERLAP, CHUNK_SIZE } from './config';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 import { Observable, Subject, takeUntil } from 'rxjs';
-
+import { Response } from 'express';
+import { SCORE_CONFIG } from '@infrastructure/config';
 @Injectable()
 export class RagService {
   private _model: ModelOpenAI;
@@ -23,90 +24,177 @@ export class RagService {
     this._postgresService = postgresService;
   }
 
-  streamQuery(query: string, clientClose: Observable<any>): Observable<MessageEvent> {
-    const start = Date.now();
-    const eventStream = new Subject<MessageEvent>();
-    let fullText = '';
-    let chunkCount = 0;
-    // Use takeUntil to stop the stream if the client disconnects
-    const stop$ = new Subject<void>();
-    clientClose.subscribe(() => {
-      stop$.next();
-      stop$.complete();
-      console.error('✋ Client disconnected from stream (RxJS)');
+  async streamQuery(query: string, res: Response): Promise<void> {
+    // Set up SSE headers
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    // Important for ensuring stream is not buffered by reverse proxies like Nginx
+    res.setHeader('X-Accel-Buffering', 'no'); 
+    res.flushHeaders();
+
+    let aborted = false;
+
+    // Handle client disconnect (NestJS uses the underlying Express/Fastify request object)
+    res.req.on('close', () => {
+      aborted = true;
+      console.log('✋ Client disconnected from stream');
     });
 
-    const send = (msg: any) => {
-      if (stop$.closed) return;
-      eventStream.next({
-        data: msg,
-        type: msg.type
-      } as MessageEvent);
-    };
-    // The core logic is wrapped in an async function and executed immediately.
-    // This allows us to use async/await within the observable creation process.
-    (async () => {
+    try {
+      this.send(res, { type: 'status', message: '🔍 Searching company documentation...' });
+
+      // --- 1️⃣ Load store + embed query ---
+      const store = await this._postgresService.getVectorStore();
+      if (!store) {
+        throw new Error('Document store unavailable');
+      }
+
+      const queryVector = await this._embeddings.embedQuery(query);
+
+      // --- 2️⃣ Search similar documents with scoring ---
+      this.send(res, { type: 'status', message: '📚 Retrieving relevant documents...' });
+      const results = await this.searchSimilarDocuments(query, queryVector, 5);
+
+      const scoredResults = results.map((r: any) => ({
+        ...r,
+        score: r.score ?? 0,
+      }));
+
+      // Calculate average score for mode selection
+      const avgScore =
+        scoredResults.length > 0
+          ? scoredResults.reduce((sum: number, r: any) => sum + r.score, 0) /
+            scoredResults.length
+          : 0;
+
+      // Debug logging
+      console.log(`📊 Query: "${query.substring(0, 50)}..."`);
+      console.log(`📈 Average relevance score: ${avgScore.toFixed(3)}`);
+      // Note: NestJS's default logger handles console output similarly
+      
+      // --- 3️⃣ Filter and build context ---
+      const filtered = scoredResults.filter(
+        (r: { score: number }) => r.score >= SCORE_CONFIG.MEDIUM_CONFIDENCE,
+      );
+
+      const context = filtered
+        .map((r: any) => {
+          const filename = r.metadata?.filename ? `[${r.metadata.filename}]` : '';
+          const content = r.pageContent ?? r.document?.pageContent ?? '';
+          return `${filename}\n${content}`;
+        })
+        .filter(Boolean)
+        .join('\n\n---\n\n');
+
+      // --- 4️⃣ Select prompt template ---
+      const { mode, template } = selectPromptMode(
+        context,
+        avgScore,
+        filtered.length,
+      );
+      const prompt = template(context, query);
+
+      this.send(res, {
+        type: 'status',
+        message: `🤖 Generating answer (${mode})...`,
+        mode,
+        documentsUsed: filtered.length,
+        averageScore: parseFloat(avgScore.toFixed(3)),
+      });
+
+      // --- 5️⃣ Stream LLM output ---
+      let fullText = '';
+      let chunkCount = 0;
+
       try {
-        // --- RAG Pipeline (Steps 1-4) ---
-        send({ type: 'status', message: '🔍 Searching company documentation...' });
-
-        const store = await this._postgresService.getVectorStore();
-        if (!store) {
-          throw new InternalServerErrorException('Document store unavailable');
-        }
-        const queryVector = await this._embeddings.embedQuery(query);
-        // ... (Steps 2, 3, 4: Search, Filter, Context, Prompt Selection) ...
-        // Simplified placeholder for brevity:
-        const avgScore = 0.9;
-        const filtered = [{ pageContent: 'Mock context', metadata: { filename: 'doc.pdf' }, score: 0.9 }];
-        const context = 'Context: ...';
-        const mode = 'RAG';
-        const prompt = `Template: ${query}`;
-
-        send({
-          type: 'status',
-          message: `🤖 Generating answer (${mode})...`,
-          mode,
-          documentsUsed: filtered.length,
-          averageScore: parseFloat(avgScore.toFixed(3)),
-        });
-
-        // --- 5️⃣ Stream LLM output ---
         const stream = await this._model.stream(prompt);
-        console.log(stream)
+
         for await (const chunk of stream) {
-          if (stop$.closed) break; // Check for client disconnect
+          if (aborted) break;
 
           const content = extractAnswerText(chunk);
-          if (content && content.trim()) {
+
+          if (content && content.trim() && !content.startsWith('{"lc":')) {
             fullText += content;
             chunkCount++;
-            send({ type: 'chunk', content });
+            this.send(res, { type: 'chunk', content });
           }
         }
 
-        // --- 6️⃣ Send context + metadata & 7️⃣ Final answer ---
-        if (!stop$.closed) {
-          // Simplified context/answer sends
-          send({ type: 'context', data: filtered.map(r => ({ ...r, score: r.score.toFixed(3) })) });
-          send({ type: 'answer', content: fullText, mode, metadata: { responseTime: `${Date.now() - start}ms` } });
-          send({ type: 'done' });
+        // Fallback logic for stream having no chunks
+        if (chunkCount === 0 && !fullText) {
+          console.warn('⚠️ Stream had no chunks, trying direct invoke...');
+          const result = await this._model.invoke(prompt);
+          fullText = extractAnswerText(result);
+          this.send(res, { type: 'chunk', content: fullText });
         }
+      } catch (streamErr) {
+        console.error('⚠️ Stream error, falling back to invoke:', streamErr);
+        const result = await this._model.invoke(prompt);
+        fullText = extractAnswerText(result);
+        this.send(res, { type: 'chunk', content: fullText });
+      }
 
-      } catch (err) {
-        console.error('❌ Stream error:', err);
-        send({
+      if (aborted) {
+        res.end();
+        return;
+      }
+
+      const answerText = fullText || extractAnswerText(fullText);
+
+      // --- 6️⃣ Send context + metadata ---
+      this.send(res, {
+        type: 'context',
+        data: filtered.map((r: any) => ({
+          pageContent: r.pageContent ?? r.document?.pageContent ?? '',
+          metadata: {
+            filename: r.metadata?.filename,
+            source: r.metadata?.source,
+            uploadedAt: r.metadata?.uploadedAt,
+            chunkIndex: r.metadata?.chunkIndex,
+            totalChunks: r.metadata?.totalChunks,
+          },
+          score: parseFloat(r.score.toFixed(3)),
+        })),
+      });
+
+      // --- 7️⃣ Send final answer ---
+      this.send(res, {
+        type: 'answer',
+        content: answerText,
+        mode,
+        metadata: {
+          documentsUsed: filtered.length,
+          totalDocumentsSearched: scoredResults.length,
+          averageRelevance: parseFloat(avgScore.toFixed(3)),
+          responseTime: `${Date.now()}ms`, // Note: You should calculate actual response time
+        },
+      });
+
+      this.send(res, { type: 'done' });
+      res.end();
+
+    } catch (err) {
+      console.error('❌ Stream error:', err);
+
+      // Check if headers have been sent before attempting to send an error message
+      if (!aborted && !res.headersSent) {
+        this.send(res, {
           type: 'error',
           details: err instanceof Error ? err.message : 'Unknown error',
           timestamp: new Date().toISOString(),
         });
-      } finally {
-        // Once the pipeline is complete (or aborted/errored), close the Subject
-        eventStream.complete();
-        stop$.complete();
       }
-    })();
-    return eventStream.asObservable().pipe(takeUntil(stop$));
+      res.end();
+    }
+  }
+  private send(res: Response, msg: StreamMessage): void {
+    try {
+      res.write(`data: ${JSON.stringify(msg)}\n\n`);
+    } catch (e) {
+      console.error('Failed to send message:', e);
+    }
   }
   async processAndStoreDocument(file: Express.Multer.File, originalFileName: string): Promise<{ chunks: number, wasMarkdownCleaned: boolean }> {
     const filePath = file.path;
@@ -178,6 +266,7 @@ export class RagService {
   async queryDocuments(query: string): Promise<any> {
     const queryVector = await this._embeddings.embedQuery(query);
     const results = await this.searchSimilarDocuments(query, queryVector);
+    console.log(`🔍 Query: "${query.substring(0, 50)}..."`);
     if (results.length === 0) {
       throw new NotFoundException("No relevant documents found.");
     }

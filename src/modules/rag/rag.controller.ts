@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, FileTypeValidator, Get, MaxFileSizeValidator, ParseFilePipe, Post, Req, Res, Sse, UploadedFile, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
+import { BadRequestException, Body, Controller, FileTypeValidator, Get, HttpCode, MaxFileSizeValidator, ParseFilePipe, Post, Req, Res, Sse, UploadedFile, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
 import { RagService } from '@rag/rag.service';
 import { FileResponse, IngestRequest, StreamQueryRequest } from '@rag/dtos';
 import { CoreApiResponse, H3Logger } from '@high3ar/common-api';
@@ -6,7 +6,7 @@ import { QueryRequest, QueryResponse } from '@rag/dtos';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { MAX_FILE_SIZE, storage } from './config';
 import { fromEvent, Observable } from 'rxjs';
-import { Request } from 'express';
+import { Response } from 'express';
 @Controller('rag')
 export class RagController {
     private readonly _ragService: RagService;
@@ -14,20 +14,37 @@ export class RagController {
         this._ragService = ragService;
     }
     @Post('stream')
-    @UsePipes(new ValidationPipe({ transform: true }))
-    streamQueryHandler(
-        @Body() dto: StreamQueryRequest,
-        @Req() req: Request,
+    @HttpCode(200)
+    // Use @Res() decorator with { passthrough: true } to directly control the response object.
+    // NOTE: For streaming/SSE, you MUST use the raw response object.
+    // The 'passthrough' option is often omitted when fully taking over the response like this.
+    async streamQueryHandler(
+        @Body() body: QueryRequest,
+        @Res() res: Response,
+    ): Promise<any> {
+        const { query } = body;
 
-    ): Observable<MessageEvent> {
-        H3Logger.info('req :: SSE ::  stream query', dto.query);
-        // 1. Create an Observable stream for the client 'close' event
-        // This allows the service to stop the RAG pipeline if the client disconnects.
-        const clientClose$ = fromEvent(req, 'close');
-        // 2. Delegate to the service, which returns the Observable stream of RAG events.
-        return this.ragService.streamQuery(dto.query, clientClose$);
+        // --- Validation ---
+        if (!query || typeof query !== 'string' || query.trim().length === 0) {
+            // Throwing a NestJS exception allows the standard exception filter to handle it
+            // if headers haven't been sent yet.
+            throw new BadRequestException({
+                error: 'Invalid query',
+                details: 'Query must be a non-empty string',
+            });
+        }
+
+        if (query.length > 5000) {
+            throw new BadRequestException({
+                error: 'Query too long',
+                details: 'Maximum 5000 characters allowed',
+            });
+        }
+
+        // --- Delegate to Service ---
+        // The service is responsible for setting headers and streaming the response.
+        return this.ragService.streamQuery(query, res);
     }
-
     @Post('/upload-file')
     @UseInterceptors(FileInterceptor('file', { storage: storage }))
     async uploadDocument(
