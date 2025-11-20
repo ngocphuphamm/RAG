@@ -54,8 +54,11 @@ export class RagService {
 
       // --- 2️⃣ Search similar documents with scoring ---
       this.send(res, { type: 'status', message: '📚 Retrieving relevant documents...' });
-      const results = await this.searchSimilarDocuments(query, queryVector, 5);
-
+      let results = await this.searchSimilarDocuments(query, queryVector, 100);
+      const TOPK = 3
+      results = results.sort((a, b) => b.score - a.score) // Sorts highest score first
+      .slice(0, TOPK); 
+      
       const scoredResults = results.map((r: any) => ({
         ...r,
         score: r.score ?? 0,
@@ -94,7 +97,7 @@ export class RagService {
         filtered.length,
       );
       const prompt = template(context, query);
-
+      console.log(`🤖 Using prompt mode: ${prompt}`);
       this.send(res, {
         type: 'status',
         message: `🤖 Generating answer (${mode})...`,
