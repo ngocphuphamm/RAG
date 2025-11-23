@@ -5,6 +5,7 @@ import { PostgresService } from '@infrastructure/database/postgres.service';
 
 @Module({
   controllers: [RagController],
-  providers: [RagService, PostgresService ]
+  providers: [RagService, PostgresService],
+  exports: [RagService],
 })
 export class RagModule {}

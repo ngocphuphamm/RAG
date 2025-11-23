@@ -25,11 +25,9 @@ export class RagService {
   }
 
   async streamQuery(query: string, res: Response): Promise<void> {
-    // Set up SSE headers
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
-    // Important for ensuring stream is not buffered by reverse proxies like Nginx
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 

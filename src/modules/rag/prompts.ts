@@ -12,7 +12,7 @@ Your responsibilities:
 - When referencing official course documentation (e.g., grading policy, textbook page), cite the source.
 - If information isn't in the provided context, clearly state this before offering general help.
 
-Context from course materials:
+Context from  materials:
 ${context}
 
 User Question: ${query}
@@ -46,7 +46,7 @@ Provide a helpful, professional, and educationally sound response.`,
     query: string
   ) => `You are a dedicated Teaching Assistant (TA) with partial access to the course documentation.
 
-Context from course docs (may be incomplete):
+Context from  docs (may be incomplete):
 ${context}
 
 User Question: ${query}

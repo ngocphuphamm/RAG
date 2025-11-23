@@ -21,6 +21,7 @@
     "noFallthroughCasesInSwitch": false,
     "paths": {
       "@rag/*": ["src/modules/rag/*"],
+      "@crawler/*": ["src/modules/crawler/*"],
       "@auth/*": ["src/modules/auth/*"],
       "@authorization/*": ["src/modules/authorization/*"],
       "@service/*": ["src/modules/service/*"],
